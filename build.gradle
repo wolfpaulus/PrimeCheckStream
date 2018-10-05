@@ -1,0 +1,112 @@
+import com.amazonaws.services.lambda.model.InvocationType
+import com.amazonaws.services.lambda.model.LogType
+import com.amazonaws.services.lambda.model.Runtime
+import jp.classmethod.aws.gradle.identitymanagement.AmazonIdentityManagementCreateRoleTask
+import jp.classmethod.aws.gradle.lambda.AWSLambdaInvokeTask
+import jp.classmethod.aws.gradle.lambda.AWSLambdaMigrateFunctionTask
+import jp.classmethod.aws.gradle.s3.CreateBucketTask
+
+plugins {
+    id 'java'
+    id 'jp.classmethod.aws.iam' version '0.38'
+    id 'jp.classmethod.aws.s3' version '0.38'
+    id 'jp.classmethod.aws.lambda' version '0.38'
+}
+
+// from AWS Console
+def accountId = '862112302373'
+def awsProfileName = 'LambdaUser'
+// from Source Code
+def lambdaHandlerName = 'com.techcasita.lambda.Prime'
+// generic
+def lambdaFunctionName = 'lambda-prime-two'
+def lambdaExecRoleName = 'lambda-exec-role-two'
+def s3BucketName = 'com.techcasita.s3.bucket'
+
+// test payload
+def jsonPayload = "{\"number\": 17}"
+
+group 'com.techcasita.lambda'
+version '1.0'
+sourceCompatibility = 1.8
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // AWS Lambda
+    compile group: 'com.amazonaws', name: 'aws-lambda-java-core', version: '1.2.0'
+    compile group: 'com.amazonaws', name: 'aws-lambda-java-events', version: '2.2.2'
+    // (de-)serialization
+    compile group: 'com.google.code.gson', name: 'gson', version: '2.8.5'
+    // logging
+    compile group: 'com.amazonaws', name: 'aws-lambda-java-log4j2', version: '1.0.0'
+    compile group: 'org.apache.logging.log4j', name: 'log4j-core', version: '2.11.1'
+    compile group: 'org.apache.logging.log4j', name: 'log4j-api', version: '2.11.1'
+    //testing
+    testCompile group: 'junit', name: 'junit', version: '4.12'
+}
+
+// create and compress artifact
+task buildZip(type: Zip, dependsOn: [clean, test]) {
+    from compileJava
+    from processResources
+    into('lib') {
+        from configurations.runtime
+    }
+}
+
+/*
+ *      AWS
+ */
+
+// Configure AWS Profile
+// .. hardcode region: Portland Oregon
+aws {
+    profileName = awsProfileName
+    region = 'us-west-2'
+}
+
+// Create an S3 Bucket
+
+task createBucket(type: CreateBucketTask) {
+    bucketName = s3BucketName
+    ifNotExists = true
+    region = aws['region']
+}
+
+// Create an AWS role 
+// .. the LambdaBasicExecutionRole needs to be created even before the function can be deployed
+task createRole(type: AmazonIdentityManagementCreateRoleTask) {
+    roleName = lambdaExecRoleName
+    assumeRolePolicyDocument = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+    policyArns = ["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"]
+}
+
+// Deploy the artifact directly (won't be stored in an S3 bucket)
+// .. creates or updates a Lambdafunction, make sure the exec-role exist before deployment
+task deploy(type: AWSLambdaMigrateFunctionTask, dependsOn: buildZip) {
+    functionName = lambdaFunctionName
+    handler = lambdaHandlerName
+    role = "arn:aws:iam::$accountId:role/$lambdaExecRoleName"
+    runtime = Runtime.Java8
+    zipFile = buildZip.archivePath
+    memorySize = 512
+    timeout = 45
+}
+
+// Invoke the Lambda Function
+// .. sends the payload and returns the serialized PrimeResponse object,
+// as well as a couple of lines from the cloud-watch log.
+task invoke(type: AWSLambdaInvokeTask) {
+    functionName = lambdaFunctionName
+    invocationType = InvocationType.RequestResponse
+    logType = LogType.Tail
+    payload = jsonPayload
+    doLast {
+        println "Status code: " + invokeResult.statusCode
+        println "Status payload: " + invokeResult.payload
+        println "Log result: " + new String(Base64.getDecoder().decode(invokeResult.logResult))
+        println "Lambda function result: " + new String(invokeResult.payload.array(), "UTF-8")
+    }
+}
